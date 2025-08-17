@@ -15,7 +15,6 @@ from geometry_msgs.msg import Point,PoseStamped
 from geometry_msgs.msg import PoseArray, Pose
 from std_msgs.msg import String
 
-#for wbcd task
 
 def cam_frame_to_base_frame(object_pose_in_camera):
     # input: 4x4 matrix in camera frame or 1x3 vector pos
@@ -468,7 +467,7 @@ def demo_cloth_edge(object_perception, object_yolo_name, realsense, merge_contou
 
     
 # ellipse-fitting
-def demo_bread_ef(object_perception, object_yolo_name, realsense, transformation = np.eye(4), merge_contours=True, vis=True):
+def demo_bread_ef(object_perception, object_yolo_name, realsense, transformation = np.eye(4), merge_contours=True, vis=False):
     """
     Returns:
       List of [ [x, y, z], yaw ] in base frame for each bread ellipse midpoint.
@@ -570,7 +569,7 @@ def demo_bread_ef(object_perception, object_yolo_name, realsense, transformation
 
     return grasp_3d
 
-def demo_bread(object_perception, object_yolo_name, realsense, transformation=np.eye(4), merge_contours=True, vis=True):
+def demo_bread(object_perception, object_yolo_name, realsense, transformation=np.eye(4), merge_contours=True, vis=False):
     """
     Returns:
     List of [ [x, y, z], yaw ] in base frame for each bread object.
@@ -716,28 +715,31 @@ def demo_bread(object_perception, object_yolo_name, realsense, transformation=np
             continue
 
     # Show the visualization with all bread objects
-    # if vis and grasp_3d:
-    #     cv2.imshow("Bread Objects", vis_img)
-    #     cv2.waitKey(0)
-    #     cv2.destroyAllWindows()
+    if vis and grasp_3d:
+        cv2.imshow("Bread Objects", vis_img)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
 
     positions = [item[0] for item in grasp_3d]
     print(positions)
     return positions
 
-def demo_objects(bread_perception, box_perception, 
-                 bread_yolo_names, box_yolo_names, 
+def demo_objects(bread_perception, box_perception, pack_perception,
+                 bread_yolo_names, box_yolo_names, pack_yolo_names,
                  realsense, transformation=np.eye(4), 
                  merge_contours=False, vis=False):
     """
-    Detect multiple object types from two YOLO models (e.g., bread + box),
+    Detect multiple object types from three YOLO models (bread + box + pack),
     estimate grasp poses via PCA, and return positions + yaw in base frame.
+    When multiple "pack" objects are detected, only return the closest one to base.
 
     Args:
         bread_perception: Yolo6DPose instance for bread/other items
         box_perception: Yolo6DPose instance for picking box
+        pack_perception: Yolo6DPose instance for pack items
         bread_yolo_names (list[str]): YOLO classes for bread_perception
         box_yolo_names (list[str]): YOLO classes for box_perception
+        pack_yolo_names (list[str]): YOLO classes for pack_perception
         realsense: RGB-D camera wrapper
         transformation (4x4): camera-to-base extrinsic
         vis (bool): enable visualization
@@ -764,14 +766,24 @@ def demo_objects(bread_perception, box_perception,
             all_contours.extend(contours)
             all_labels.extend([obj_name] * len(contours))
 
+    # 4. Detect using pack_perception
+    for obj_name in pack_yolo_names:
+        seg_output = pack_perception.yolo_seg(color_image, obj_name, visualize=False)
+        if seg_output is not None and len(seg_output) > 0:
+            contours, _ = seg_output
+            all_contours.extend(contours)
+            all_labels.extend([obj_name] * len(contours))
+
     if not all_contours:
         print("No objects detected")
         return []
 
     grasp_3d = []
+    pack_candidates = []  # Store pack objects with their distances
+    packbox_candidates = []  # Store packbox objects with their distances
     vis_img = color_image.copy()
 
-    # 4. Process each contour
+    # 5. Process each contour
     for idx, (contour, obj_label) in enumerate(zip(all_contours, all_labels)):
         cnt_np = np.asarray(contour, dtype=np.int32)
         if cnt_np.ndim == 1 and cnt_np.size % 2 == 0:
@@ -785,13 +797,16 @@ def demo_objects(bread_perception, box_perception,
         mask = np.zeros(depth_image.shape, dtype=np.uint8)
         cv2.drawContours(mask, [cnt_np], 0, 255, -1)
 
-        # Pick correct perception for pointcloud
+        # Pick correct perception for pointcloud based on object label
         if obj_label in bread_yolo_names:
             pointcloud = bread_perception.get_pointcloud(mask, depth_image)
             proj_func = bread_perception.project_point_to_image
-        else:
+        elif obj_label in box_yolo_names:
             pointcloud = box_perception.get_pointcloud(mask, depth_image)
             proj_func = box_perception.project_point_to_image
+        else:  # obj_label in pack_yolo_names
+            pointcloud = pack_perception.get_pointcloud(mask, depth_image)
+            proj_func = pack_perception.project_point_to_image
 
         if pointcloud is None or len(pointcloud) < 10:
             continue
@@ -814,47 +829,171 @@ def demo_objects(bread_perception, box_perception,
             center_hom = np.append(center_point, 1.0)
             base_center = (transformation @ center_hom)[:3].tolist()
 
-            grasp_3d.append([base_center, yaw, obj_label])
+            # Calculate distance from base origin
+            distance_to_base = np.sqrt(base_center[0]**2 + base_center[1]**2 + base_center[2]**2)
 
-            # Visualization
-            if vis:
-                label_colors = {
-                    "bread": (0, 255, 0),
-                    "bowl": (255, 0, 0),
-                    "plate": (0, 0, 255),
-                    "box": (0, 255, 255)
-                }
-                color = label_colors.get(obj_label, (200, 200, 200))
+            # Special handling for "pack" and "packbox" objects
+            if obj_label == "pack":
+                pack_candidates.append({
+                    'data': [base_center, yaw, obj_label],
+                    'distance': distance_to_base,
+                    'contour': cnt_np,
+                    'center_px': proj_func(points_mean),
+                    'major_axis': major_axis,
+                    'eigenvalues': eigenvalues,
+                    'points_mean': points_mean,
+                    'idx': idx
+                })
+            elif obj_label == "packbox":
+                packbox_candidates.append({
+                    'data': [base_center, yaw, obj_label],
+                    'distance': distance_to_base,
+                    'contour': cnt_np,
+                    'center_px': proj_func(points_mean),
+                    'major_axis': major_axis,
+                    'eigenvalues': eigenvalues,
+                    'points_mean': points_mean,
+                    'idx': idx
+                })
+            else:
+                # Add non-pack objects directly
+                grasp_3d.append([base_center, yaw, obj_label])
 
-                cv2.drawContours(vis_img, [cnt_np], 0, color, 2)
-                center_px = proj_func(points_mean)
-                cv2.circle(vis_img, tuple(center_px.astype(int)), 5, color, -1)
+                # Visualization for non-pack objects
+                if vis:
+                    label_colors = {
+                        "bread": (0, 255, 0),
+                        "bowl": (255, 0, 0),
+                        "plate": (0, 0, 255),
+                        "box": (0, 255, 255),
+                        "wooden-block": (255, 255, 0),
+                        "tennis": (255, 0, 255),
+                        "can": (128, 255, 0),
+                        "cone": (255, 128, 0),
+                        "lollipop": (0, 128, 255),
+                        "ocean-ball": (128, 0, 255),
+                        "paper-box": (255, 255, 128),
+                        "pack": (128, 128, 255),
+                        "packbox": (255, 128, 128)
+                    }
+                    color = label_colors.get(obj_label, (200, 200, 200))
 
-                axis_length = np.sqrt(eigenvalues[0]) * 0.5
-                axis_endpoint1 = points_mean + major_axis * axis_length
-                axis_endpoint2 = points_mean - major_axis * axis_length
-                px1 = proj_func(axis_endpoint1)
-                px2 = proj_func(axis_endpoint2)
-                cv2.line(vis_img, tuple(px1.astype(int)), tuple(px2.astype(int)), color, 2)
+                    cv2.drawContours(vis_img, [cnt_np], 0, color, 2)
+                    center_px = proj_func(points_mean)
+                    cv2.circle(vis_img, tuple(center_px.astype(int)), 5, color, -1)
 
-                cv2.putText(vis_img, f"{obj_label.capitalize()} {idx+1}", 
-                            (int(center_px[0])+10, int(center_px[1])-10), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                cv2.putText(vis_img, f"Yaw: {np.degrees(yaw):.1f} deg", 
-                            (int(center_px[0])+10, int(center_px[1])+10), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-                cv2.putText(vis_img, f"Pos: [{base_center[0]:.2f}, {base_center[1]:.2f}, {base_center[2]:.2f}]", 
-                            (int(center_px[0])+10, int(center_px[1])+30), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                    axis_length = np.sqrt(eigenvalues[0]) * 0.5
+                    axis_endpoint1 = points_mean + major_axis * axis_length
+                    axis_endpoint2 = points_mean - major_axis * axis_length
+                    px1 = proj_func(axis_endpoint1)
+                    px2 = proj_func(axis_endpoint2)
+                    cv2.line(vis_img, tuple(px1.astype(int)), tuple(px2.astype(int)), color, 2)
+
+                    cv2.putText(vis_img, f"{obj_label.capitalize()} {idx+1}", 
+                                (int(center_px[0])+10, int(center_px[1])-10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                    cv2.putText(vis_img, f"Yaw: {np.degrees(yaw):.1f} deg", 
+                                (int(center_px[0])+10, int(center_px[1])+10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                    cv2.putText(vis_img, f"Pos: [{base_center[0]:.2f}, {base_center[1]:.2f}, {base_center[2]:.2f}]", 
+                                (int(center_px[0])+10, int(center_px[1])+30), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
         except Exception as e:
             print(f"Error processing object {idx+1} ({obj_label}): {e}")
             continue
 
+    # 6. Handle pack objects - only keep the closest one
+    if pack_candidates:
+        closest_pack = min(pack_candidates, key=lambda x: x['distance'])
+        grasp_3d.append(closest_pack['data'])
+        
+        print(f"Found {len(pack_candidates)} pack object(s), selected closest one at distance {closest_pack['distance']:.3f}")
+        
+        # Visualization for the selected pack object
+        if vis:
+            obj_label = "pack"
+            color = (128, 128, 255)  # pack color
+            
+            cv2.drawContours(vis_img, [closest_pack['contour']], 0, color, 2)
+            center_px = closest_pack['center_px']
+            cv2.circle(vis_img, tuple(center_px.astype(int)), 5, color, -1)
+
+            axis_length = np.sqrt(closest_pack['eigenvalues'][0]) * 0.5
+            axis_endpoint1 = closest_pack['points_mean'] + closest_pack['major_axis'] * axis_length
+            axis_endpoint2 = closest_pack['points_mean'] - closest_pack['major_axis'] * axis_length
+            px1 = pack_perception.project_point_to_image(axis_endpoint1)
+            px2 = pack_perception.project_point_to_image(axis_endpoint2)
+            cv2.line(vis_img, tuple(px1.astype(int)), tuple(px2.astype(int)), color, 2)
+
+            base_center = closest_pack['data'][0]
+            yaw = closest_pack['data'][1]
+            cv2.putText(vis_img, f"Pack {closest_pack['idx']+1}", 
+                        (int(center_px[0])+10, int(center_px[1])-10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            cv2.putText(vis_img, f"Yaw: {np.degrees(yaw):.1f} deg", 
+                        (int(center_px[0])+10, int(center_px[1])+10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            cv2.putText(vis_img, f"Pos: [{base_center[0]:.2f}, {base_center[1]:.2f}, {base_center[2]:.2f}]", 
+                        (int(center_px[0])+10, int(center_px[1])+30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            # cv2.putText(vis_img, f"Dist: {closest_pack['distance']:.3f}", 
+            #             (int(center_px[0])+10, int(center_px[1])+50), 
+            #             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+    # 7. Handle packbox objects - only keep the closest one
+    if packbox_candidates:
+        closest_packbox = min(packbox_candidates, key=lambda x: x['distance'])
+        grasp_3d.append(closest_packbox['data'])
+        
+        print(f"Found {len(packbox_candidates)} packbox object(s), selected closest one at distance {closest_packbox['distance']:.3f}")
+        
+        # Visualization for the selected packbox object
+        if vis:
+            obj_label = "packbox"
+            color = (255, 128, 128)  # packbox color
+            
+            cv2.drawContours(vis_img, [closest_packbox['contour']], 0, color, 2)
+            center_px = closest_packbox['center_px']
+            cv2.circle(vis_img, tuple(center_px.astype(int)), 5, color, -1)
+
+            axis_length = np.sqrt(closest_packbox['eigenvalues'][0]) * 0.5
+            axis_endpoint1 = closest_packbox['points_mean'] + closest_packbox['major_axis'] * axis_length
+            axis_endpoint2 = closest_packbox['points_mean'] - closest_packbox['major_axis'] * axis_length
+            
+            # Determine which perception to use for projection based on which YOLO names contain "packbox"
+            if "packbox" in bread_yolo_names:
+                px1 = bread_perception.project_point_to_image(axis_endpoint1)
+                px2 = bread_perception.project_point_to_image(axis_endpoint2)
+            elif "packbox" in box_yolo_names:
+                px1 = box_perception.project_point_to_image(axis_endpoint1)
+                px2 = box_perception.project_point_to_image(axis_endpoint2)
+            else:  # packbox in pack_yolo_names
+                px1 = pack_perception.project_point_to_image(axis_endpoint1)
+                px2 = pack_perception.project_point_to_image(axis_endpoint2)
+                
+            cv2.line(vis_img, tuple(px1.astype(int)), tuple(px2.astype(int)), color, 2)
+
+            base_center = closest_packbox['data'][0]
+            yaw = closest_packbox['data'][1]
+            cv2.putText(vis_img, f"Packbox {closest_packbox['idx']+1}", 
+                        (int(center_px[0])+10, int(center_px[1])-10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            cv2.putText(vis_img, f"Yaw: {np.degrees(yaw):.1f} deg", 
+                        (int(center_px[0])+10, int(center_px[1])+10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            cv2.putText(vis_img, f"Pos: [{base_center[0]:.2f}, {base_center[1]:.2f}, {base_center[2]:.2f}]", 
+                        (int(center_px[0])+10, int(center_px[1])+30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            # cv2.putText(vis_img, f"Dist: {closest_packbox['distance']:.3f}", 
+            #             (int(center_px[0])+10, int(center_px[1])+50), 
+            #             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
     if vis and grasp_3d:
         cv2.imshow("Detected Objects", vis_img)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
+    
     print(grasp_3d)
     return grasp_3d
 
@@ -1011,6 +1150,8 @@ def demo_lolipop_axe(object_perception, object_yolo_name, realsense, transformat
 
 if __name__ == "__main__":
 
+
+
     try:
         rospy.get_rostime()  # 测试ROS是否已经初始化
         print("ROS already initialized, skipping init_node")
@@ -1022,10 +1163,9 @@ if __name__ == "__main__":
 
 
 
-
     K = np.load("perception/camera_intrinsics.npy")
     # Minimal changes in the main block:
-    Demos = ["box_bowl", "candy", "box_box", "box_block", "lolipop", "box_ocean_ball", "cloth", "bread", "lolipop_axe", "bowl", "all"]
+    Demos = ["box_bowl", "candy", "box_box", "box_block", "lolipop", "box_ocean_ball", "cloth", "bread", "lolipop_axe", "bowl", "all", "pack"]
     Demo = "all"
     depth_scale = 0.01 #0.01 for realsense d405, 0.001 for d435
     realsense = Realsense(depth_scale= depth_scale)
@@ -1158,15 +1298,16 @@ if __name__ == "__main__":
             demo_bread(bread_perception, "bowl", realsense, merge_contours= False)
     if Demo == "all":
         bread_perception = Yolo6DPose(K, YOLO("perception/yolo_segmentation/segment_wbcd18.pt"))
-        box_perception = Yolo6DPose(K, YOLO("perception/yolo_segmentation/segment_picking_box4.pt"))
-
+        box_perception = Yolo6DPose(K, YOLO("perception/yolo_segmentation/packbox.pt"))
+        pack_perception = Yolo6DPose(K, YOLO("perception/yolo_segmentation/pack0.pt"))
         for _ in range(50):
             realsense.get_frames()
         for i in range(10):
             positions = demo_objects(
-                bread_perception, box_perception,
+                bread_perception, box_perception, pack_perception,
                 ["bowl","wooden-block","tennis","bread","can","cone","lollipop","ocean-ball","paper-box"],
-                ["box"],
+                ["packbox"],
+                ["pack"],
                 realsense,
                 transformation=np.array([[0, -0.743, 0.669, 0.047],
                                         [-1, 0, 0, 0.055],
@@ -1174,6 +1315,7 @@ if __name__ == "__main__":
                                         [0, 0, 0, 1]]),
                 vis=False
             )
+
             if i==9:
                 print("Reached 9th iteration, starting continuous publishing...")
                 pub = rospy.Publisher('/object_poses', String, queue_size=1)
@@ -1215,11 +1357,4 @@ if __name__ == "__main__":
                         rospy.loginfo(f"Published: {final_data}")
                         rate.sleep()
                 break
-                
-
-
-
-
-
-
-            
+   
