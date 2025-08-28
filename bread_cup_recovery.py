@@ -14,6 +14,7 @@ import rospy
 from geometry_msgs.msg import Point,PoseStamped
 from geometry_msgs.msg import PoseArray, Pose
 from std_msgs.msg import String
+import logging
 
 
 def cam_frame_to_base_frame(object_pose_in_camera):
@@ -1335,49 +1336,51 @@ if __name__ == "__main__":
                                         [-1, 0, 0, 0.055],
                                         [0, -0.669, -0.743, 0.46],
                                         [0, 0, 0, 1]]),
-                vis= False
+                vis=False
             )
 
 
-            if i==9:
-                print("Reached 9th iteration, starting continuous publishing...")
-                pub = rospy.Publisher('/object_poses', String, queue_size=1)
-                # pub = rospy.Publisher('/object_data', String, queue_size=1)
-                rospy.sleep(0.5)  # 给publisher时间初始化
-
-                rate = rospy.Rate(10)  # 10Hz发布频率，可以调整
-                
-                while not rospy.is_shutdown():
-                    # 如果你需要实时检测，取消下面这行的注释
-                    # positions = demo_bread(bread_perception, "bowl", realsense, merge_contours=False)
-                        data_list = []
-                        for i, pos in enumerate(positions):
-                            try:
-                                xyz_list = pos[0]  # [x, y, z]
-                                yaw_angle = float(pos[1])  # yaw
-                                object_name = pos[2]  # object
-                                
-                                x, y, z = xyz_list[0], xyz_list[1], xyz_list[2]
-                                
-                                # 格式：x,y,z,yaw,object_name
-                                data_str = f"{x},{y},{z},{yaw_angle},{object_name}"
-                                data_list.append(data_str)
-                                
-                                rospy.loginfo(f"Object: {object_name}, x:{x:.3f}, y:{y:.3f}, z:{z:.3f}, yaw:{yaw_angle:.3f}")
-                                
-                            except (IndexError, TypeError, ValueError) as e:
-                                rospy.logwarn(f"Error processing position {i}: {pos}, error: {e}")
-                                continue
-                        
-                        # 用分号分隔多个物体
-                        final_data = ";".join(data_list)
-                        
-                        # 发布数据
-                        msg = String()
-                        msg.data = final_data
-                        pub.publish(msg)
-                        
-                        rospy.loginfo(f"Published: {final_data}")
-                        rate.sleep()
-                break
+                  # 从第9次开始，创建发布者并持续发布
+        logging.info("Reached 9th iteration, starting continuous publishing...")
+        pub = rospy.Publisher('/object_poses', String, queue_size=1)
+        rospy.sleep(0.5)  # 给publisher时间初始化
+        rate = rospy.Rate(10)  # 10Hz发布频率
+        
+        while not rospy.is_shutdown():
+            # 实时获取新的位置信息
+            positions = demo_objects(
+                bread_perception, cup_perception, pack_perception,
+                ["lollipop"],
+                ["tall-black-cup", "short-black-cup", "white-cup", "blue-cup", "transparent-cup"],
+                [""],
+                realsense,
+                transformation=np.array([[0, -0.743, 0.669, 0.047],
+                                        [-1, 0, 0, 0.055],
+                                        [0, -0.669, -0.743, 0.46],
+                                        [0, 0, 0, 1]]),
+                vis=False
+            )
+            
+            data_list = []
+            for i, pos in enumerate(positions):
+                try:
+                    xyz_list = pos[0]  # [x, y, z]
+                    yaw_angle = float(pos[1])  # yaw
+                    object_name = pos[2]  # object
+                    x, y, z = xyz_list[0], xyz_list[1], xyz_list[2]
+                    
+                    data_str = f"{x},{y},{z},{yaw_angle},{object_name}"
+                    data_list.append(data_str)
+                    rospy.loginfo(f"Object: {object_name}, x:{x:.3f}, y:{y:.3f}, z:{z:.3f}, yaw:{yaw_angle:.3f}")
+                except (IndexError, TypeError, ValueError) as e:
+                    rospy.logwarn(f"Error processing position {i}: {pos}, error: {e}")
+                    continue
+            
+            # 发布数据
+            final_data = ";".join(data_list)
+            msg = String()
+            msg.data = final_data
+            pub.publish(msg)
+            rospy.loginfo(f"Published: {final_data}")
+            rate.sleep()
    
