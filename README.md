@@ -9,6 +9,7 @@ This repository contains the perception system for the Skillgraph G1 task, desig
 - **Original Code**: CMU RI ICL (ICRA WBCD competition)
 - **Task-Specific Adaptation**: Han Zhou (ICL)
 - **ROS Interface**: Yijie Liao (Summer Research Intern, ICL)
+- **README Author**: Yijie Liao
 
 For specific usage questions, please contact Yijie Liao or Han Zhou.
 
