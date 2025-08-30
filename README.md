@@ -91,20 +91,21 @@ for i in range(10):
 
 ### Basic Object Detection
 ```python
+#If you put the perception file under the home, don't go into perception/ to run the file, just stay in home file to run.
 # For initial object detection
-python bread_wbcd.py  # Set Demo = "all" in code
+~/$ python bread_wbcd.py  # Set Demo = "all" in code
 
 # For cup detection
-python bread_cup.py   # Set Demo = "cup" in code
+~/$ python bread_cup.py   # Set Demo = "cup" in code
 ```
 
 ### Real-time Tracking
 ```python
 # For failure recovery
-python bread_fail_recovery.py     # Set Demo = "all" in code
+~/$ python bread_fail_recovery.py     # Set Demo = "all" in code
 
 # For pouring task recovery
-python bread_cup_recovery.py      # Set Demo = "cup" in code
+~/$ python bread_cup_recovery.py      # Set Demo = "cup" in code
 ```
 
 ## Configuration
